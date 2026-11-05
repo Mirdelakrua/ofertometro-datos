@@ -5,6 +5,7 @@ Salida: productos.json, cadenas.json, canasta.json, meta.json, e historial.json 
 import csv, glob, io, json, os, re, statistics, sys, tempfile, zipfile, collections, datetime, unicodedata
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from categorias import clasificar_varias, SUB_NOMBRES
+from ciudades import ciudad as ciudad_de
 csv.field_size_limit(10**9)
 
 POR_SUB = 24          # productos por subcategoría (los más presentes)
@@ -118,6 +119,14 @@ def nombre_bonito(d):
     t = re.sub(r'(\d),(\d{3})\b', r'\1.\2', t)
     return re.sub(r'\s+', ' ', t).strip()
 
+def localidades(cadenas):
+    # {provincia: [[ciudad, sucursales, cadenas], ...]} ordenado por cantidad de sucursales
+    t = collections.defaultdict(lambda: collections.defaultdict(lambda: [0, 0]))
+    for c in cadenas.values():
+        for pv, locs in c.get('loc', {}).items():
+            for n, k in locs.items(): t[pv][n][0] += k; t[pv][n][1] += 1
+    return {pv: sorted([[n, v[0], v[1]] for n, v in d.items()], key=lambda x: (-x[1], x[0])) for pv, d in t.items()}
+
 def media_recortada(v):
     # media geométrica sin el 10% de cada punta: distingue cadenas sin que un error de carga pese
     import math
@@ -143,7 +152,7 @@ def main(src, outdir):
     fecha = None
     m = re.search(r'(\d{4}-\d{2}-\d{2})', ' '.join(dirs)); fecha = m.group(1) if m else datetime.date.today().isoformat()
     # --- comercios / banderas / sucursales
-    ban = {}; suc = {}; cad_info = collections.defaultdict(lambda: {'suc': 0, 'prov': collections.Counter()})
+    ban = {}; suc = {}; cad_info = collections.defaultdict(lambda: {'suc': 0, 'prov': collections.Counter(), 'loc': collections.defaultdict(collections.Counter)})
     for d in dirs:
         for c in rd(d + 'comercio.csv'):
             nom = c.get('comercio_bandera_nombre', '').strip()
@@ -157,7 +166,14 @@ def main(src, outdir):
             pv = pv if pv in PROVINCIAS else None
             suc[(s['id_comercio'], s['id_bandera'], s['id_sucursal'])] = pv
             ci = cad_info[ban[k][0]]; ci['suc'] += 1; ci['nombre'] = ban[k][1]
-            if pv: ci['prov'][pv] += 1
+            if pv:
+                ci['prov'][pv] += 1
+                try:
+                    la = float(s.get('sucursales_latitud', '').replace(',', '.')); lo = float(s.get('sucursales_longitud', '').replace(',', '.'))
+                    if not (-56 < la < -21 and -74 < lo < -53): la = lo = None
+                except ValueError: la = lo = None
+                cdd = ciudad_de(pv, la, lo) if la is not None else None
+                if cdd: ci['loc'][pv][cdd] += 1
     # --- pasada 1: cobertura por EAN
     cov = collections.defaultdict(set); nsuc = collections.Counter(); descs = collections.defaultdict(collections.Counter); marca = {}
     for d in dirs:
@@ -245,7 +261,8 @@ def main(src, outdir):
     cadenas = {}
     for sl, ci in cad_info.items():
         if 'nombre' not in ci: continue
-        cadenas[sl] = {'nombre': ci['nombre'], 'sucursales': ci['suc'], 'prov': dict(ci['prov'].most_common())}
+        cadenas[sl] = {'nombre': ci['nombre'], 'sucursales': ci['suc'], 'prov': dict(ci['prov'].most_common()),
+                       'loc': {pv: dict(c.most_common()) for pv, c in ci['loc'].items()}}
     # índice de precios por cadena (precio relativo a la mediana de cada producto)
     rel = collections.defaultdict(list)
     for p in salida:
@@ -292,7 +309,7 @@ def main(src, outdir):
             'sucursales': sum(c['sucursales'] for c in cadenas.values()), 'cadenas': len(cadenas),
             'fuente': 'SEPA – Precios Claros, Secretaría de Comercio (datos.produccion.gob.ar)',
             'subcategorias': {s: SUB_NOMBRES[s] for s in sorted({p['sub'] for p in salida})},
-            'provincias': PROVINCIAS}
+            'provincias': PROVINCIAS, 'localidades': localidades(cadenas)}
     def dump(n, obj):
         with open(os.path.join(outdir, n), 'w', encoding='utf-8') as f: json.dump(obj, f, ensure_ascii=False, separators=(',', ':'))
     dump('productos.json', salida); dump('cadenas.json', cadenas)
