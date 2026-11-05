@@ -43,17 +43,43 @@ def num(x):
         v = float(x.replace(',', '.'));  return v if v > 0 else None
     except Exception: return None
 
+def entradas_zip(ruta):
+    """Lista [(nombre, bytes)] de un ZIP. Si el directorio central está roto (le pasa al SEPA),
+    recorre los encabezados locales: las entradas vienen sin comprimir o con deflate."""
+    import struct, zlib
+    try:
+        with zipfile.ZipFile(ruta) as z:
+            return [(n, z.read(n)) for n in z.namelist() if not n.endswith('/')]
+    except zipfile.BadZipFile:
+        pass
+    out = []
+    with open(ruta, 'rb') as f:
+        pos = 0
+        while True:
+            f.seek(pos); h = f.read(30)
+            if len(h) < 30 or h[:4] != b'PK\x03\x04': break
+            _, _, flag, meth, _, _, _, cs, us, nl, el = struct.unpack('<IHHHHHIIIHH', h)
+            nombre = f.read(nl).decode('utf-8', 'replace'); f.seek(pos + 30 + nl + el)
+            if flag & 8 and cs == 0: raise RuntimeError('ZIP con tamaños diferidos: no soportado (' + nombre + ')')
+            dato = f.read(cs)
+            if meth == 8: dato = zlib.decompress(dato, -15)
+            if not nombre.endswith('/'): out.append((nombre, dato))
+            pos += 30 + nl + el + cs
+    return out
+
 def extraer(src):
     if os.path.isdir(src): return src
     out = tempfile.mkdtemp(prefix='sepa_')
-    with zipfile.ZipFile(src) as z:
-        for n in z.namelist():
-            if not n.endswith('.zip'): continue
-            d = os.path.join(out, os.path.basename(n)[:-4]); os.makedirs(d, exist_ok=True)
-            with zipfile.ZipFile(io.BytesIO(z.read(n))) as zi:
-                for m in zi.namelist():
-                    if m.endswith('.csv'):
-                        with open(os.path.join(d, os.path.basename(m)), 'wb') as f: f.write(zi.read(m))
+    for n, dato in entradas_zip(src):
+        if not n.endswith('.zip') or not dato: continue
+        d = os.path.join(out, os.path.basename(n)[:-4]); os.makedirs(d, exist_ok=True)
+        tmp = os.path.join(d, '_in.zip')
+        with open(tmp, 'wb') as f: f.write(dato)
+        del dato
+        for m, contenido in entradas_zip(tmp):
+            if m.endswith('.csv'):
+                with open(os.path.join(d, os.path.basename(m)), 'wb') as f: f.write(contenido)
+        os.remove(tmp)
     return out
 
 ABREV = [(r'\bX\s?(\d)', r'x \1'), (r'\bGRS?\.?\b|\bGRM\b|\bGR\b', 'g'), (r'\bLTS?\.?\b|\bLTR\b', 'L'), (r'\bCC\.?\b', 'cc'),
