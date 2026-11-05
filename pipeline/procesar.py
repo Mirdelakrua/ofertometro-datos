@@ -128,7 +128,7 @@ def media_recortada(v):
 def hasta_iso(ley):
     m = re.search(r'hasta (?:el )?(\d{4})-(\d{2})-(\d{2})', ley, re.I)
     if m: return '%s-%s-%s' % m.groups()
-    m = re.search(r'hasta (?:el )?(\d{1,2})/(\d{1,2})/(\d{2,4})', ley, re.I)
+    m = re.search(r'(?:hasta|al) (?:el )?(\d{1,2})/(\d{1,2})/(\d{2,4})', ley, re.I)
     if not m: return None
     a = int(m.group(3)); a = a + 2000 if a < 100 else a
     try: return datetime.date(a, int(m.group(2)), int(m.group(1))).isoformat()
@@ -235,8 +235,9 @@ def main(src, outdir):
         meds = [cads[c]['p'] for c in (grandes_c if len(grandes_c) >= 3 else cads)]
         prov = {}
         for pv, dd in idxp[e].items():
-            fila = sorted(((round(statistics.median(v)), cad) for cad, v in dd.items()))
-            prov[pv] = [[c, p] for p, c in fila[:6]]
+            # todas las cadenas con sucursales en la provincia: [cadena, mediana, sucursales]
+            fila = sorted(((round(statistics.median(v)), cad, len(v)) for cad, v in dd.items() if cad in cads))
+            prov[pv] = [[c, p, n] for p, c, n in fila]
         salida.append({'ean': e, 'slug': sl, 'nombre': nom, 'marca': (marca.get(e) or '').title(), 'cat': cat, 'sub': sub,
                        'cad': cads, 'med': round(statistics.median(meds)), 'min': min(meds), 'max': max(meds), 'prov': prov})
     salida.sort(key=lambda x: (x['cat'], x['sub'], -sum(c['n'] for c in x['cad'].values())))
@@ -276,16 +277,17 @@ def main(src, outdir):
         # faltantes: se imputan con la mediana × índice de la cadena para comparar parejo
         imp = sum(bys[s]['med'] * cadenas[g]['indice'] / 100 for s in falt)
         tot[g] = {'total': round(sum(items) + imp), 'reales': len(items), 'imputados': len(falt)}
+    # Ranking por provincia: cada cadena contra el precio típico DE ESA provincia, con todos los productos
     can_prov = {}
     for pv in PROVINCIAS:
-        fila = {}
-        for g in cadenas:
-            vals = []
-            for s in canasta:
-                pr = dict((c, p) for c, p in bys[s]['prov'].get(pv, []))
-                if g in pr: vals.append(pr[g] / bys[s]['med'])
-            if len(vals) >= len(canasta) * 0.6 and cadenas[g]['sucursales'] >= 5 and cadenas[g]['prov'].get(pv, 0) >= 2: fila[g] = round(media_recortada(vals) * 100, 1)
-        if fila: can_prov[pv] = dict(sorted(fila.items(), key=lambda x: x[1]))
+        rel_pv = collections.defaultdict(list)
+        for p in salida:
+            fila = [x for x in p['prov'].get(pv, []) if cadenas.get(x[0], {}).get('sucursales', 0) >= 5 and cadenas[x[0]]['prov'].get(pv, 0) >= 2]
+            if len(fila) < 2: continue
+            m = statistics.median([x[1] for x in fila])
+            for x in fila: rel_pv[x[0]].append(x[1] / m)
+        fila = {g: round(media_recortada(v) * 100, 1) for g, v in rel_pv.items() if len(v) >= 60}
+        if len(fila) >= 2: can_prov[pv] = dict(sorted(fila.items(), key=lambda x: x[1]))
     meta = {'fecha': fecha, 'generado': datetime.datetime.now().isoformat(timespec='seconds'), 'productos': len(salida),
             'sucursales': sum(c['sucursales'] for c in cadenas.values()), 'cadenas': len(cadenas),
             'fuente': 'SEPA – Precios Claros, Secretaría de Comercio (datos.produccion.gob.ar)',
