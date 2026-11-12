@@ -146,7 +146,14 @@ def hasta_iso(ley):
 def puntaje_desc(d):
     return (len(re.findall(r'[A-Za-zÁÉÍÓÚÑáéíóúñ]{4,}', d)) * 3 - d.count('.') * 2 + len(d) / 30)
 
+DIAS_GRACIA = 21   # días que se mantiene un producto sin datos antes de retirarlo (y redirigir su página)
+
 def main(src, outdir):
+    # Catálogo persistente: una vez publicado, un producto conserva su URL (slug) para siempre
+    cat_path = os.path.join(outdir, 'catalogo.json')
+    CAT = json.load(open(cat_path, encoding='utf-8')) if os.path.exists(cat_path) else {}
+    prev_path = os.path.join(outdir, 'productos.json')
+    PREV = {p['ean']: p for p in json.load(open(prev_path, encoding='utf-8'))} if os.path.exists(prev_path) else {}
     base = extraer(src); os.makedirs(outdir, exist_ok=True)
     dirs = sorted(glob.glob(os.path.join(base, '*/')))
     fecha = None
@@ -197,6 +204,9 @@ def main(src, outdir):
     for (cat, sub), lst in por_sub.items():
         lst.sort(reverse=True)
         for n, e, best in lst[:POR_SUB_GRANDE.get(sub, POR_SUB)]: sel[e] = (cat, sub, best)
+    for e, c in CAT.items():
+        if c.get('estado') == 'retirado' or e in sel or len(cov.get(e, ())) < 2 or not descs.get(e): continue
+        sel[e] = (c['cat'], c['sub'], max(descs[e], key=puntaje_desc))
     # --- pasada 2: precios
     P = collections.defaultdict(list)       # (e, cad) -> [precio]
     PP = collections.defaultdict(list)      # (e, prov, cad) -> [precio]
@@ -230,12 +240,17 @@ def main(src, outdir):
     idxr = collections.defaultdict(dict)
     for (e, cad), v in PR.items(): idxr[e][cad] = v
     salida = []
+    slugs = {c['slug'] for c in CAT.values()}
     for e, cat, sub, best in prods:
-        if len(idx[e]) < MIN_CADENAS - 1: continue
+        minimo = 2 if e in CAT else MIN_CADENAS - 1
+        if len(idx[e]) < minimo: continue
         nom = nombre_bonito(best)
-        sl = slugify(nom)[:80].strip('-')
-        if sl in slugs: sl = (sl + '-' + e[-4:])
-        slugs.add(sl)
+        if e in CAT:
+            sl = CAT[e]['slug']
+        else:
+            sl = slugify(nom)[:80].strip('-')
+            if sl in slugs: sl = (sl + '-' + e[-4:])
+            slugs.add(sl)
         cads = {}
         for cad, v in idx[e].items():
             v.sort(); med = statistics.median(v)
@@ -246,7 +261,7 @@ def main(src, outdir):
                 pr = idxr[e][cad]; pmin = min(pr)
                 item['promo'] = {'p': round(pmin[0]), 'txt': pmin[1], 'n': len(pr), 'hasta': pmin[2]}
             cads[cad] = item
-        if len(cads) < MIN_CADENAS - 1: continue
+        if len(cads) < minimo: continue
         grandes_c = [c for c in cads if c in cad_info and cad_info[c]['suc'] >= 10]
         meds = [cads[c]['p'] for c in (grandes_c if len(grandes_c) >= 3 else cads)]
         prov = {}
@@ -256,7 +271,29 @@ def main(src, outdir):
             prov[pv] = [[c, p, n] for p, c, n in fila]
         salida.append({'ean': e, 'slug': sl, 'nombre': nom, 'marca': (marca.get(e) or '').title(), 'cat': cat, 'sub': sub,
                        'cad': cads, 'med': round(statistics.median(meds)), 'min': min(meds), 'max': max(meds), 'prov': prov})
+    hoy_eans = {x['ean'] for x in salida}
+    for x in salida:
+        c = CAT.setdefault(x['ean'], {'slug': x['slug'], 'cat': x['cat'], 'sub': x['sub'], 'desde': fecha, 'alias': []})
+        c.update({'ultimo': fecha, 'estado': 'activo'})
+    limite = (datetime.date.fromisoformat(fecha) - datetime.timedelta(days=DIAS_GRACIA)).isoformat()
+    for e, c in CAT.items():
+        if e in hoy_eans or c.get('estado') == 'retirado': continue
+        if c.get('ultimo', '') >= limite and e in PREV:
+            x = dict(PREV[e]); x['slug'] = c['slug']; x['viejo'] = c.get('ultimo')   # se muestra con aviso de fecha
+            salida.append(x)
+        else:
+            c['estado'] = 'retirado'
     salida.sort(key=lambda x: (x['cat'], x['sub'], -sum(c['n'] for c in x['cad'].values())))
+    with open(cat_path, 'w', encoding='utf-8') as f: json.dump(CAT, f, ensure_ascii=False, separators=(',', ':'))
+    # Redirecciones 301: URLs viejas (alias) a la actual y productos retirados a su subcategoría
+    redir = {}
+    activos = {x['slug'] for x in salida}
+    for e, c in CAT.items():
+        destino = '/precio/' + c['slug'] + '/' if c['slug'] in activos else '/precios/' + c['cat'] + '/' + c['sub'] + '/'
+        if c['slug'] not in activos: redir['/precio/' + c['slug'] + '/'] = destino
+        for a in c.get('alias', []):
+            if a != c['slug'] and a not in activos: redir['/precio/' + a + '/'] = destino
+    with open(os.path.join(outdir, 'redirecciones.json'), 'w', encoding='utf-8') as f: json.dump(redir, f, ensure_ascii=False, separators=(',', ':'))
     # --- cadenas
     cadenas = {}
     for sl, ci in cad_info.items():
